@@ -87,6 +87,7 @@ textarea:focus{border-color:var(--muted)}
     <div class="field"><label>Tamanho do texto <b id="vSize"></b></label><input type="range" id="size" min="20" max="80" step="2" value="38"></div>
     <div class="field"><label>Escurecer fundo <b id="vShade"></b></label><input type="range" id="shade" min="0" max="90" step="5" value="55"></div>
     <div class="field"><label>Câmera</label><select id="facing"><option value="user">Frontal (selfie)</option><option value="environment">Traseira</option></select></div>
+    <div class="field"><label>Campo de visão</label><select id="fov"><option value="max">Máximo — câmera mais aberta (4:3)</option><option value="169">Formato 16:9 (mais fechado)</option></select></div>
     <div class="field"><label>Qualidade</label><select id="quality"><option value="1080">1080p</option><option value="720">720p</option></select></div>
     <label class="field check"><input type="checkbox" id="countdown" checked> Contagem 3-2-1</label>
     <label class="field check"><input type="checkbox" id="flip"> Espelhar texto (para vidro de teleprompter)</label>
@@ -139,7 +140,7 @@ const $=id=>document.getElementById(id);
 const store={get(k,d){try{const v=localStorage.getItem("tp_"+k);return v===null?d:v}catch{return d}},set(k,v){try{localStorage.setItem("tp_"+k,v)}catch{}}};
 
 // ----- preferências -----
-const prefs=["speed","size","shade","facing","quality"];
+const prefs=["speed","size","shade","facing","fov","quality"];
 const checks=["countdown","flip","fullText"];
 $("script").value=store.get("script","Olá! Este é o seu teleprompter.\n\nCole aqui o seu roteiro. Quando apertar Gravar, o texto vai rolar sozinho enquanto a câmera grava.\n\nToque no texto para pausar. Use + e − para ajustar a velocidade.\n\nOlhe para a lente da câmera, logo acima do texto.");
 prefs.forEach(k=>{const v=store.get(k,null); if(v!==null) $(k).value=v;});
@@ -151,18 +152,24 @@ prefs.forEach(k=>$(k).addEventListener("input",()=>{store.set(k,$(k).value);labe
 checks.forEach(k=>$(k).addEventListener("change",()=>store.set(k,$(k).checked?"1":"0")));
 
 // ----- câmera -----
+let camInfo="";
 let stream=null, facing=$("facing").value, lenses=[], lensIdx=0;
 async function openCamera(deviceId){
   stopCamera();
   // Pedir a resolução "deitada" (como o sensor é). Pedir em pé faz muitos celulares cortarem a imagem e parecer com zoom.
-  const q=+$("quality").value, long=q===1080?1920:1280;
-  const video={width:{ideal:long},height:{ideal:q},frameRate:{ideal:30}};
+  // "Máximo": formato 4:3, que é o formato real do sensor — a câmera mostra tudo o que enxerga.
+  // 16:9 obriga o celular a cortar a imagem (fica mais "fechada", principalmente na frontal).
+  const q=+$("quality").value, wide=$("fov").value==="max";
+  const ratio=wide?4/3:16/9, long=Math.round(q*ratio);
+  const video={width:{ideal:long},height:{ideal:q},aspectRatio:{ideal:ratio},frameRate:{ideal:30}};
   if(deviceId) video.deviceId={exact:deviceId}; else video.facingMode=facing;
   const audio={echoCancellation:true,noiseSuppression:true};
   try{ stream=await navigator.mediaDevices.getUserMedia({video,audio}); }
   catch(e){ if(e.name==="NotAllowedError") throw e; stream=await navigator.mediaDevices.getUserMedia({video:deviceId?{deviceId:{exact:deviceId}}:{facingMode:facing},audio}); }
   $("cam").srcObject=stream;
   $("cam").classList.toggle("mirror",facing==="user");
+  const st=stream.getVideoTracks()[0].getSettings?.()||{};
+  camInfo=st.width&&st.height?`${st.width}×${st.height}`:"";
   await setupZoom();
   await findLenses();
 }
@@ -192,6 +199,7 @@ function buildChips(){
 }
 function showZoom(){
   $("zoomVal").textContent=(+zoom).toFixed(1)+"x";
+  $("zoomVal").title=camInfo;
   [...$("zoomChips").children].forEach(b=>b.classList.toggle("on",Math.abs(+b.dataset.v-zoom)<0.05));
   const s=zoomMode==="digital"?zoom:1;
   $("cam").style.transform=(facing==="user"?"scaleX(-1) ":"")+`scale(${s})`;
@@ -220,8 +228,10 @@ async function findLenses(){
   lenses=[];
   try{
     const all=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
-    const back=all.filter(d=>/back|traseira|rear|environment|tele|ultra|wide|angular/i.test(d.label));
-    if(facing==="environment" && back.length>1) lenses=back;
+    const back=all.filter(d=>/back|traseira|rear|environment|tele|ultra|wide|angular/i.test(d.label)&&!/front|frontal/i.test(d.label));
+    const front=all.filter(d=>/front|frontal|user|facing front/i.test(d.label));
+    const group=facing==="environment"?back:front;
+    if(group.length>1) lenses=group;
   }catch{}
   const cur=stream?.getVideoTracks()[0]?.getSettings?.().deviceId;
   lensIdx=Math.max(0,lenses.findIndex(l=>l.deviceId===cur));
