@@ -83,7 +83,7 @@ textarea:focus{border-color:var(--muted)}
   <h1>Teleprompter <span>●</span></h1>
   <textarea id="script" placeholder="Cole ou escreva seu roteiro aqui…"></textarea>
   <div class="grid">
-    <div class="field"><label>Velocidade <b id="vSpeed"></b></label><input type="range" id="speed" min="1" max="10" step="1" value="3"></div>
+    <div class="field"><label>Velocidade <b id="vSpeed"></b></label><input type="range" id="speed" min="1" max="20" step="1" value="4"></div>
     <div class="field"><label>Tamanho do texto <b id="vSize"></b></label><input type="range" id="size" min="20" max="80" step="2" value="38"></div>
     <div class="field"><label>Escurecer fundo <b id="vShade"></b></label><input type="range" id="shade" min="0" max="90" step="5" value="55"></div>
     <div class="field"><label>Câmera</label><select id="facing"><option value="user">Frontal (selfie)</option><option value="environment">Traseira</option></select></div>
@@ -270,11 +270,12 @@ function buildText(){
 }
 function apply(){ const sc=$("scroller"); const max=Math.max(0,sc.scrollHeight-$("prompt").clientHeight*0.5); pos=Math.min(Math.max(0,pos),max); sc.style.transform=`translateY(${-pos}px)`+($("flip").checked?" scaleX(-1)":""); }
 function tick(t){
-  if(playing){ const dt=last?(t-last)/1000:0; pos+=dt*speed*14; apply(); }
+  // velocidade proporcional ao tamanho da letra: no 1 anda ~1 linha a cada 13 segundos
+  if(playing){ const dt=last?Math.min(0.1,(t-last)/1000):0; pos+=dt*speed*(+$("size").value)*0.1; apply(); }
   last=t; requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
-function setSpeed(v){ speed=Math.min(15,Math.max(1,v)); $("speedVal").textContent=speed; }
+function setSpeed(v){ speed=Math.min(20,Math.max(1,v)); $("speedVal").textContent=speed; $("speed").value=speed; store.set("speed",speed); labels(); }
 $("slower").onclick=()=>setSpeed(speed-1);
 $("faster").onclick=()=>setSpeed(speed+1);
 $("restart").onclick=()=>{pos=0;apply();};
