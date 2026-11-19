@@ -87,14 +87,13 @@ textarea:focus{border-color:var(--muted)}
     <div class="field"><label>Tamanho do texto <b id="vSize"></b></label><input type="range" id="size" min="20" max="80" step="2" value="38"></div>
     <div class="field"><label>Escurecer fundo <b id="vShade"></b></label><input type="range" id="shade" min="0" max="90" step="5" value="55"></div>
     <div class="field"><label>Câmera</label><select id="facing"><option value="user">Frontal (selfie)</option><option value="environment">Traseira</option></select></div>
-    <div class="field"><label>Formato</label><select id="aspect"><option value="portrait">Vertical 9:16 (Reels/TikTok)</option><option value="landscape">Horizontal 16:9 (YouTube)</option></select></div>
     <div class="field"><label>Qualidade</label><select id="quality"><option value="1080">1080p</option><option value="720">720p</option></select></div>
     <label class="field check"><input type="checkbox" id="countdown" checked> Contagem 3-2-1</label>
     <label class="field check"><input type="checkbox" id="flip"> Espelhar texto (para vidro de teleprompter)</label>
     <label class="field check"><input type="checkbox" id="fullText"> Texto na tela inteira</label>
   </div>
   <button class="big" id="go">Abrir câmera</button>
-  <p class="small" id="note">O vídeo é gravado e fica só no seu aparelho; nada é enviado para a internet. Durante a gravação: toque no texto para pausar/continuar a rolagem, arraste para voltar ou avançar.</p>
+  <p class="small" id="note">O vídeo é gravado e fica só no seu aparelho; nada é enviado para a internet. Segure o celular em pé para vídeo vertical (Reels/TikTok) ou deitado para horizontal (YouTube). Durante a gravação: toque no texto para pausar/continuar a rolagem, arraste para voltar ou avançar.</p>
 </section>
 
 <!-- ========== GRAVAÇÃO ========== -->
@@ -107,6 +106,7 @@ textarea:focus{border-color:var(--muted)}
     <div id="speedBox"><button id="slower" aria-label="Mais devagar">−</button><span id="speedVal">3</span><button id="faster" aria-label="Mais rápido">+</button></div>
   </div>
   <div id="count" class="hidden"></div>
+  <button class="pill" id="fitBtn" style="position:absolute;left:50%;transform:translateX(-50%);bottom:calc(162px + env(safe-area-inset-bottom));z-index:3;font-size:.8rem">⛶ Imagem inteira</button>
   <div id="zoomBar">
     <div class="chips" id="zoomChips"></div>
     <input type="range" id="zoom" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
@@ -139,7 +139,7 @@ const $=id=>document.getElementById(id);
 const store={get(k,d){try{const v=localStorage.getItem("tp_"+k);return v===null?d:v}catch{return d}},set(k,v){try{localStorage.setItem("tp_"+k,v)}catch{}}};
 
 // ----- preferências -----
-const prefs=["speed","size","shade","facing","aspect","quality"];
+const prefs=["speed","size","shade","facing","quality"];
 const checks=["countdown","flip","fullText"];
 $("script").value=store.get("script","Olá! Este é o seu teleprompter.\n\nCole aqui o seu roteiro. Quando apertar Gravar, o texto vai rolar sozinho enquanto a câmera grava.\n\nToque no texto para pausar. Use + e − para ajustar a velocidade.\n\nOlhe para a lente da câmera, logo acima do texto.");
 prefs.forEach(k=>{const v=store.get(k,null); if(v!==null) $(k).value=v;});
@@ -154,11 +154,13 @@ checks.forEach(k=>$(k).addEventListener("change",()=>store.set(k,$(k).checked?"1
 let stream=null, facing=$("facing").value, lenses=[], lensIdx=0;
 async function openCamera(deviceId){
   stopCamera();
-  const q=+$("quality").value, portrait=$("aspect").value==="portrait";
-  const long=q===1080?1920:1280, short=q;
-  const video={width:{ideal:portrait?short:long},height:{ideal:portrait?long:short},frameRate:{ideal:30}};
+  // Pedir a resolução "deitada" (como o sensor é). Pedir em pé faz muitos celulares cortarem a imagem e parecer com zoom.
+  const q=+$("quality").value, long=q===1080?1920:1280;
+  const video={width:{ideal:long},height:{ideal:q},frameRate:{ideal:30}};
   if(deviceId) video.deviceId={exact:deviceId}; else video.facingMode=facing;
-  stream=await navigator.mediaDevices.getUserMedia({video,audio:{echoCancellation:true,noiseSuppression:true}});
+  const audio={echoCancellation:true,noiseSuppression:true};
+  try{ stream=await navigator.mediaDevices.getUserMedia({video,audio}); }
+  catch(e){ if(e.name==="NotAllowedError") throw e; stream=await navigator.mediaDevices.getUserMedia({video:deviceId?{deviceId:{exact:deviceId}}:{facingMode:facing},audio}); }
   $("cam").srcObject=stream;
   $("cam").classList.toggle("mirror",facing==="user");
   await setupZoom();
@@ -169,14 +171,16 @@ function stopCamera(){ if(stream){stream.getTracks().forEach(t=>t.stop()); strea
 // ----- zoom -----
 // "hw": zoom real da câmera (Android/Chrome) — já sai gravado no vídeo.
 // "digital": quando o aparelho não libera zoom (iPhone), corta a imagem; na gravação o recorte é desenhado num canvas.
-let zoomMode="digital", zoom=1;
+let zoomMode="digital", zoom=1, fitAll=store.get("fitAll","1")==="1";
+$("fitBtn")?.addEventListener("click",()=>{ fitAll=!fitAll; store.set("fitAll",fitAll?"1":"0"); showZoom(); });
 async function setupZoom(){
   const track=stream.getVideoTracks()[0];
   const caps=track.getCapabilities?track.getCapabilities():{};
   const z=$("zoom");
   if(caps.zoom && caps.zoom.max>caps.zoom.min){
     zoomMode="hw"; z.min=caps.zoom.min; z.max=caps.zoom.max; z.step=caps.zoom.step||0.1;
-    const cur=track.getSettings?.().zoom; zoom=cur||caps.zoom.min;
+    zoom=caps.zoom.min; // começa o mais aberto possível
+    try{ await track.applyConstraints({advanced:[{zoom}]}); }catch{}
   } else { zoomMode="digital"; z.min=1; z.max=5; z.step=0.1; zoom=1; }
   z.value=zoom; buildChips(); showZoom();
 }
@@ -191,6 +195,8 @@ function showZoom(){
   [...$("zoomChips").children].forEach(b=>b.classList.toggle("on",Math.abs(+b.dataset.v-zoom)<0.05));
   const s=zoomMode==="digital"?zoom:1;
   $("cam").style.transform=(facing==="user"?"scaleX(-1) ":"")+`scale(${s})`;
+  $("cam").style.objectFit=fitAll?"contain":"cover";
+  $("fitBtn").textContent=fitAll?"⛶ Imagem inteira":"⛶ Tela cheia";
 }
 let zoomPending=null, zoomBusy=false;
 async function setZoom(v){
