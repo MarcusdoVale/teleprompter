@@ -57,6 +57,14 @@ textarea:focus{border-color:var(--muted)}
 #speedBox{display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.55);border-radius:99px;padding:4px}
 #speedBox button{width:36px;height:36px;border-radius:50%;border:none;background:rgba(255,255,255,.15);cursor:pointer;font-size:1.1rem}
 #speedVal{min-width:28px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600}
+#cam{transform-origin:center}
+#zoomBar{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(112px + env(safe-area-inset-bottom));display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.55);border-radius:99px;padding:6px 14px;z-index:3;width:min(340px,calc(100% - 32px))}
+#zoomBar input{flex:1;accent-color:#fff;min-width:0}
+#zoomVal{min-width:44px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+.chips{display:flex;gap:6px}
+.chips button{border:none;border-radius:99px;padding:5px 9px;background:rgba(255,255,255,.16);font-size:.8rem;font-weight:600;cursor:pointer}
+.chips button.on{background:#fff;color:#000}
+#lensBtn{font-size:.8rem}
 #count{position:absolute;inset:0;display:grid;place-items:center;font-size:30vmin;font-weight:800;text-shadow:0 4px 20px #000;z-index:4;pointer-events:none}
 
 /* ---------- Revisão ---------- */
@@ -99,10 +107,16 @@ textarea:focus{border-color:var(--muted)}
     <div id="speedBox"><button id="slower" aria-label="Mais devagar">−</button><span id="speedVal">3</span><button id="faster" aria-label="Mais rápido">+</button></div>
   </div>
   <div id="count" class="hidden"></div>
+  <div id="zoomBar">
+    <div class="chips" id="zoomChips"></div>
+    <input type="range" id="zoom" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
+    <span id="zoomVal">1.0x</span>
+  </div>
   <div class="controls">
     <button class="round" id="restart" title="Voltar o texto ao início">⟲</button>
     <button id="recBtn" aria-label="Gravar"><b></b></button>
     <button class="round" id="switchCam" title="Trocar câmera">⇄</button>
+    <button class="round hidden" id="lensBtn" title="Trocar lente">1x</button>
   </div>
 </section>
 
@@ -137,17 +151,95 @@ prefs.forEach(k=>$(k).addEventListener("input",()=>{store.set(k,$(k).value);labe
 checks.forEach(k=>$(k).addEventListener("change",()=>store.set(k,$(k).checked?"1":"0")));
 
 // ----- câmera -----
-let stream=null, facing=$("facing").value;
-async function openCamera(){
+let stream=null, facing=$("facing").value, lenses=[], lensIdx=0;
+async function openCamera(deviceId){
   stopCamera();
   const q=+$("quality").value, portrait=$("aspect").value==="portrait";
   const long=q===1080?1920:1280, short=q;
-  const video={facingMode:facing,width:{ideal:portrait?short:long},height:{ideal:portrait?long:short},frameRate:{ideal:30}};
+  const video={width:{ideal:portrait?short:long},height:{ideal:portrait?long:short},frameRate:{ideal:30}};
+  if(deviceId) video.deviceId={exact:deviceId}; else video.facingMode=facing;
   stream=await navigator.mediaDevices.getUserMedia({video,audio:{echoCancellation:true,noiseSuppression:true}});
   $("cam").srcObject=stream;
   $("cam").classList.toggle("mirror",facing==="user");
+  await setupZoom();
+  await findLenses();
 }
 function stopCamera(){ if(stream){stream.getTracks().forEach(t=>t.stop()); stream=null;} }
+
+// ----- zoom -----
+// "hw": zoom real da câmera (Android/Chrome) — já sai gravado no vídeo.
+// "digital": quando o aparelho não libera zoom (iPhone), corta a imagem; na gravação o recorte é desenhado num canvas.
+let zoomMode="digital", zoom=1;
+async function setupZoom(){
+  const track=stream.getVideoTracks()[0];
+  const caps=track.getCapabilities?track.getCapabilities():{};
+  const z=$("zoom");
+  if(caps.zoom && caps.zoom.max>caps.zoom.min){
+    zoomMode="hw"; z.min=caps.zoom.min; z.max=caps.zoom.max; z.step=caps.zoom.step||0.1;
+    const cur=track.getSettings?.().zoom; zoom=cur||caps.zoom.min;
+  } else { zoomMode="digital"; z.min=1; z.max=5; z.step=0.1; zoom=1; }
+  z.value=zoom; buildChips(); showZoom();
+}
+function buildChips(){
+  const z=$("zoom"), min=+z.min, max=+z.max, box=$("zoomChips"); box.textContent="";
+  [min,1,2,3,5].filter((v,i,a)=>v>=min&&v<=max&&a.indexOf(v)===i).slice(0,3).forEach(v=>{
+    const b=document.createElement("button"); b.textContent=(v<1?v.toFixed(1):v)+"x"; b.dataset.v=v; b.onclick=()=>setZoom(v); box.append(b);
+  });
+}
+function showZoom(){
+  $("zoomVal").textContent=(+zoom).toFixed(1)+"x";
+  [...$("zoomChips").children].forEach(b=>b.classList.toggle("on",Math.abs(+b.dataset.v-zoom)<0.05));
+  const s=zoomMode==="digital"?zoom:1;
+  $("cam").style.transform=(facing==="user"?"scaleX(-1) ":"")+`scale(${s})`;
+}
+let zoomPending=null, zoomBusy=false;
+async function setZoom(v){
+  const z=$("zoom"); zoom=Math.min(+z.max,Math.max(+z.min,+v)); z.value=zoom; showZoom();
+  if(zoomMode!=="hw"||!stream) return;
+  zoomPending=zoom; if(zoomBusy) return; zoomBusy=true;
+  while(zoomPending!==null){ const val=zoomPending; zoomPending=null;
+    try{ await stream.getVideoTracks()[0].applyConstraints({advanced:[{zoom:val}]}); }catch{} }
+  zoomBusy=false;
+}
+$("zoom").addEventListener("input",e=>setZoom(e.target.value));
+// pinça com dois dedos em qualquer lugar da tela
+let pinch=null;
+$("stage").addEventListener("touchstart",e=>{ if(e.touches.length===2){ pinch={d:dist(e.touches),z:zoom}; } },{passive:true});
+$("stage").addEventListener("touchmove",e=>{ if(pinch&&e.touches.length===2){ e.preventDefault(); setZoom(pinch.z*dist(e.touches)/pinch.d); } },{passive:false});
+$("stage").addEventListener("touchend",e=>{ if(e.touches.length<2) pinch=null; });
+function dist(t){ return Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY); }
+
+// ----- lentes (ultra-angular / teleobjetiva) -----
+async function findLenses(){
+  lenses=[];
+  try{
+    const all=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
+    const back=all.filter(d=>/back|traseira|rear|environment|tele|ultra|wide|angular/i.test(d.label));
+    if(facing==="environment" && back.length>1) lenses=back;
+  }catch{}
+  const cur=stream?.getVideoTracks()[0]?.getSettings?.().deviceId;
+  lensIdx=Math.max(0,lenses.findIndex(l=>l.deviceId===cur));
+  $("lensBtn").classList.toggle("hidden",lenses.length<2);
+  if(lenses.length) $("lensBtn").textContent=lensName(lenses[lensIdx].label);
+}
+function lensName(l){ return /ultra/i.test(l)?"0.5x":/tele/i.test(l)?"Tele":/dupla|dual|tripla|triple/i.test(l)?"Auto":"1x"; }
+$("lensBtn").onclick=async()=>{
+  if(!lenses.length||recorder?.state==="recording") return;
+  lensIdx=(lensIdx+1)%lenses.length;
+  try{ await openCamera(lenses[lensIdx].deviceId); }catch{ await openCamera(); }
+};
+
+// canvas para gravar o zoom digital
+let canvasLoop=null;
+function zoomedStream(){
+  const v=$("cam"), W=v.videoWidth||720, H=v.videoHeight||1280;
+  const c=document.createElement("canvas"); c.width=W; c.height=H; const g=c.getContext("2d");
+  const draw=()=>{ const s=zoom, w=W/s, h=H/s; g.drawImage(v,(W-w)/2,(H-h)/2,w,h,0,0,W,H); };
+  draw(); canvasLoop=setInterval(draw,1000/30);
+  const out=c.captureStream(30);
+  stream.getAudioTracks().forEach(t=>out.addTrack(t));
+  return out;
+}
 
 // ----- texto rolando -----
 let pos=0, playing=false, last=0, speed=+$("speed").value;
@@ -196,8 +288,10 @@ async function startRec(){
   if(busy||!stream) return; busy=true;
   await countdown();
   const type=pickType();
-  try{ recorder=new MediaRecorder(stream,type?{mimeType:type,videoBitsPerSecond:8_000_000}:undefined); }
-  catch{ recorder=new MediaRecorder(stream); }
+  // zoom digital: grava sempre pelo canvas para o zoom poder mudar durante a gravação
+  const src=(zoomMode==="digital"&&HTMLCanvasElement.prototype.captureStream)?zoomedStream():stream;
+  try{ recorder=new MediaRecorder(src,type?{mimeType:type,videoBitsPerSecond:8_000_000}:undefined); }
+  catch{ recorder=new MediaRecorder(src); }
   ext=(recorder.mimeType||type).includes("mp4")?"mp4":"webm";
   chunks=[];
   recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
@@ -205,14 +299,15 @@ async function startRec(){
   recorder.start(1000);
   startAt=Date.now(); $("rec").classList.remove("hidden"); $("time").textContent="00:00";
   timer=setInterval(()=>$("time").textContent=fmt((Date.now()-startAt)/1000),500);
-  $("recBtn").classList.add("on"); $("switchCam").disabled=true; $("back").disabled=true;
+  $("recBtn").classList.add("on"); $("switchCam").disabled=true; $("back").disabled=true; $("lensBtn").disabled=true;
   playing=true; busy=false;
   lockScreen();
 }
 function stopRec(){
   if(!recorder||recorder.state==="inactive") return;
   recorder.stop(); playing=false; clearInterval(timer);
-  $("rec").classList.add("hidden"); $("recBtn").classList.remove("on"); $("switchCam").disabled=false; $("back").disabled=false;
+  if(canvasLoop){ const id=canvasLoop; canvasLoop=null; setTimeout(()=>clearInterval(id),300); }
+  $("rec").classList.add("hidden"); $("recBtn").classList.remove("on"); $("switchCam").disabled=false; $("back").disabled=false; $("lensBtn").disabled=false;
 }
 $("recBtn").onclick=()=>{ if(recorder&&recorder.state==="recording") stopRec(); else startRec(); };
 
