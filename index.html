@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0b0d12">
 <title>Teleprompter</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=swap">
 <style>
 :root{--bg:#0b0d12;--panel:#151925;--fg:#f2f4f8;--muted:#9aa3b8;--line:#2a3042;--accent:#ff3b4a;--ok:#36c58a}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -65,6 +66,18 @@ textarea:focus{border-color:var(--muted)}
 .chips button{border:none;border-radius:99px;padding:5px 9px;background:rgba(255,255,255,.16);font-size:.8rem;font-weight:600;cursor:pointer}
 .chips button.on{background:#fff;color:#000}
 #lensBtn{font-size:.8rem}
+#out{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#cam.behind{opacity:0}
+#filterBar{position:absolute;left:0;right:0;bottom:calc(160px + env(safe-area-inset-bottom));z-index:3;display:flex;flex-direction:column;align-items:center;gap:6px}
+#filters{display:flex;gap:8px;overflow-x:auto;max-width:100%;padding:2px max(14px,env(safe-area-inset-left));scrollbar-width:none}
+#filters::-webkit-scrollbar{display:none}
+#filters button{flex:none;border:2px solid transparent;border-radius:12px;padding:0;background:rgba(0,0,0,.55);cursor:pointer;display:flex;flex-direction:column;align-items:center;overflow:hidden;width:64px}
+#filters button i{display:block;width:100%;height:40px}
+#filters button span{font-size:.7rem;font-weight:600;padding:3px 0 4px}
+#filters button.on{border-color:#fff}
+#amountRow{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.55);border-radius:99px;padding:4px 12px;font-size:.75rem;font-weight:600;width:min(300px,calc(100% - 32px))}
+#amountRow input{flex:1;accent-color:#fff;min-width:0}
+#amountRow b{min-width:36px;text-align:right;font-variant-numeric:tabular-nums}
 #count{position:absolute;inset:0;display:grid;place-items:center;font-size:30vmin;font-weight:800;text-shadow:0 4px 20px #000;z-index:4;pointer-events:none}
 
 /* ---------- Revisão ---------- */
@@ -100,6 +113,7 @@ textarea:focus{border-color:var(--muted)}
 <!-- ========== GRAVAÇÃO ========== -->
 <section id="stage" class="hidden">
   <video id="cam" playsinline autoplay muted></video>
+  <canvas id="out" class="hidden"></canvas>
   <div id="prompt"><div id="scroller"></div></div>
   <div class="topbar">
     <button class="pill" id="back">✕ Roteiro</button>
@@ -107,7 +121,11 @@ textarea:focus{border-color:var(--muted)}
     <div id="speedBox"><button id="slower" aria-label="Mais devagar">−</button><span id="speedVal">3</span><button id="faster" aria-label="Mais rápido">+</button></div>
   </div>
   <div id="count" class="hidden"></div>
-  <button class="pill" id="fitBtn" style="position:absolute;left:50%;transform:translateX(-50%);bottom:calc(162px + env(safe-area-inset-bottom));z-index:3;font-size:.8rem">⛶ Imagem inteira</button>
+  <button class="pill" id="fitBtn" style="position:absolute;left:max(10px,env(safe-area-inset-left));top:calc(56px + env(safe-area-inset-top));z-index:3;font-size:.8rem">⛶ Imagem inteira</button>
+  <div id="filterBar" class="hidden">
+    <div id="filters"></div>
+    <div id="amountRow"><span>Intensidade</span><input type="range" id="amount" min="0" max="100" step="5" value="100" aria-label="Intensidade do filtro"><b id="amountVal">100%</b></div>
+  </div>
   <div id="zoomBar">
     <div class="chips" id="zoomChips"></div>
     <input type="range" id="zoom" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
@@ -171,6 +189,7 @@ async function openCamera(deviceId){
   const st=stream.getVideoTracks()[0].getSettings?.()||{};
   camInfo=st.width&&st.height?`${st.width}×${st.height}`:"";
   await setupZoom();
+  startGL();
   await findLenses();
 }
 function stopCamera(){ if(stream){stream.getTracks().forEach(t=>t.stop()); stream=null;} }
@@ -201,9 +220,12 @@ function showZoom(){
   $("zoomVal").textContent=(+zoom).toFixed(1)+"x";
   $("zoomVal").title=camInfo;
   [...$("zoomChips").children].forEach(b=>b.classList.toggle("on",Math.abs(+b.dataset.v-zoom)<0.05));
-  const s=zoomMode==="digital"?zoom:1;
-  $("cam").style.transform=(facing==="user"?"scaleX(-1) ":"")+`scale(${s})`;
-  $("cam").style.objectFit=fitAll?"contain":"cover";
+  const s=zoomMode==="digital"?zoom:1, mir=facing==="user"?"scaleX(-1) ":"";
+  if(gl){ // o WebGL já faz o zoom digital e o filtro; a tela mostra o canvas
+    $("out").style.transform=""; $("out").style.objectFit=fitAll?"contain":"cover"; // espelho feito no WebGL
+  } else {
+    $("cam").style.transform=mir+`scale(${s})`; $("cam").style.objectFit=fitAll?"contain":"cover";
+  }
   $("fitBtn").textContent=fitAll?"⛶ Imagem inteira":"⛶ Tela cheia";
 }
 let zoomPending=null, zoomBusy=false;
@@ -245,7 +267,168 @@ $("lensBtn").onclick=async()=>{
   try{ await openCamera(lenses[lensIdx].deviceId); }catch{ await openCamera(); }
 };
 
-// canvas para gravar o zoom digital
+// ----- filtros (WebGL): o que aparece na tela é exatamente o que é gravado -----
+// b=brilho c=contraste s=saturação w=temperatura t=tom (verde/magenta) p=sépia f=desbotado v=vinheta h=realce de sombras
+const FILTERS=[
+  {id:"none",  name:"Normal"},
+  {id:"bright",name:"Luz",      b:.06,c:1.05,s:1.08,h:.15},
+  {id:"warm",  name:"Dourado",  b:.02,c:1.08,s:1.12,w:.55,v:.25},
+  {id:"cool",  name:"Brisa",    b:.02,c:1.05,s:.95,w:-.5,v:.15},
+  {id:"vivid", name:"Vibrante", c:1.18,s:1.45,v:.2},
+  {id:"soft",  name:"Pêssego",  b:.05,c:.92,s:1.05,w:.3,t:-.15,f:.25},
+  {id:"film",  name:"Filme",    c:1.1,s:.85,w:.25,f:.35,v:.35},
+  {id:"retro", name:"Retrô",    c:1.05,s:.9,p:.45,f:.2,v:.4},
+  {id:"drama", name:"Drama",    b:-.03,c:1.35,s:.9,v:.5},
+  {id:"pb",    name:"P&B",      c:1.15,s:0,v:.3},
+  {id:"noir",  name:"Noir",     b:-.04,c:1.6,s:0,v:.55},
+  {id:"night", name:"Neon",     c:1.15,s:1.3,w:-.4,t:.35,v:.3},
+  {id:"vhs",   name:"Fita VHS", c:1.08,s:.78,w:.2,f:.22,v:.4,vhs:1,stamp:true},
+  {id:"vhs2",  name:"VHS limpo",c:1.05,s:.85,w:.15,f:.15,v:.3,vhs:.5},
+];
+let gl=null, glProg=null, glTex=null, glU={}, filter=FILTERS.find(f=>f.id===store.get("filter","none"))||FILTERS[0], amount=+store.get("amount","100");
+function initGL(){
+  const cv=$("out");
+  try{ gl=cv.getContext("webgl",{premultipliedAlpha:false,preserveDrawingBuffer:true})||cv.getContext("experimental-webgl"); }catch{ gl=null; }
+  if(!gl) return false;
+  // m=1 espelha (câmera frontal): o vídeo gravado fica igual ao que você vê, como no Instagram
+  const vs=`attribute vec2 p;varying vec2 uv;varying vec2 suv;uniform float z,m;void main(){suv=p*vec2(.5,-.5)+.5;vec2 q=suv;if(m>.5)q.x=1.-q.x;uv=(q-.5)/z+.5;gl_Position=vec4(p,0,1);}`;
+  const fs=`precision mediump float;varying vec2 uv;varying vec2 suv;uniform sampler2D tex;uniform sampler2D ov;
+  uniform float b,c,s,w,t,pp,f,v,h,a,vhs,tm,ovOn;
+  float rnd(vec2 x){return fract(sin(dot(x,vec2(12.9898,78.233)))*43758.5453);}
+  void main(){
+    vec2 u=uv;
+    float k=vhs*a;
+    if(k>0.){
+      float line=floor(suv.y*240.);
+      u.x+=(rnd(vec2(line,floor(tm*24.)))-.5)*.004*k;               // tremida horizontal
+      float band=step(.985,fract(suv.y*.7-tm*.15));                    // faixa de "tracking" passando
+      u.x+=band*.012*k;
+    }
+    vec3 o=texture2D(tex,uv).rgb;
+    vec3 col=texture2D(tex,u).rgb;
+    if(k>0.){
+      float sh=.004*k;
+      col.r=texture2D(tex,u+vec2(sh,0.)).r; col.b=texture2D(tex,u-vec2(sh,0.)).b;  // cor vazando
+      col=mix(col,(texture2D(tex,u+vec2(.002,0.)).rgb+texture2D(tex,u-vec2(.002,0.)).rgb+col)/3.,.6*k); // imagem mais macia
+    }
+    float L=dot(col,vec3(.299,.587,.114));
+    col+=h*(1.-smoothstep(0.,.5,L))*.25;            // clareia sombras
+    col+=b;
+    col=(col-.5)*c+.5;
+    L=dot(col,vec3(.299,.587,.114));
+    col=mix(vec3(L),col,s);
+    col.r+=w*.08; col.b-=w*.08; col.g+=t*.05; col.rb-=t*.025;
+    vec3 sep=vec3(dot(col,vec3(.393,.769,.189)),dot(col,vec3(.349,.686,.168)),dot(col,vec3(.272,.534,.131)));
+    col=mix(col,sep,pp);
+    col=mix(col,col*.82+.1,f);
+    float d=distance(uv,vec2(.5));
+    col*=1.-v*smoothstep(.35,.85,d);
+    vec3 outc=mix(o,col,a);
+    if(k>0.){
+      outc*=1.-.14*k*step(.5,fract(suv.y*180.));                    // linhas de varredura
+      outc+=(rnd(suv*vec2(913.,577.)+tm)-.5)*.10*k;                  // granulado
+    }
+    if(ovOn>.5){ vec4 tx=texture2D(ov,suv); outc=mix(outc,tx.rgb,tx.a); }  // data/hora na tela
+    gl_FragColor=vec4(clamp(outc,0.,1.),1.);
+  }`;
+  const sh=(type,src)=>{const x=gl.createShader(type);gl.shaderSource(x,src);gl.compileShader(x);if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x;};
+  try{
+    glProg=gl.createProgram(); gl.attachShader(glProg,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(glProg,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(glProg);
+    if(!gl.getProgramParameter(glProg,gl.LINK_STATUS)) throw new Error("link");
+  }catch{ gl=null; return false; }
+  gl.useProgram(glProg);
+  const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(glProg,"p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  glTex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,glTex);
+  [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T].forEach(k=>gl.texParameteri(gl.TEXTURE_2D,k,gl.CLAMP_TO_EDGE));
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  ["z","m","b","c","s","w","t","pp","f","v","h","a","vhs","tm","ovOn","tex","ov"].forEach(n=>glU[n]=gl.getUniformLocation(glProg,n));
+  gl.uniform1i(glU.tex,0); gl.uniform1i(glU.ov,1);
+  glOvTex=gl.createTexture(); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,glOvTex);
+  [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T].forEach(k=>gl.texParameteri(gl.TEXTURE_2D,k,gl.CLAMP_TO_EDGE));
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,glTex);
+  return true;
+}
+// carimbo de câmera VHS: "PLAY ▶" em cima, data e hora embaixo (desenhado num canvas e misturado no WebGL)
+let glOvTex=null, ovCanvas=document.createElement("canvas"), ovKey="";
+function drawStamp(W,H){
+  const now=new Date(), recOn=recorder&&recorder.state==="recording";
+  const key=W+"x"+H+now.getSeconds()+recOn+(Math.floor(now.getMilliseconds()/500));
+  if(key===ovKey) return false; ovKey=key;
+  ovCanvas.width=W; ovCanvas.height=H; const g=ovCanvas.getContext("2d");
+  g.clearRect(0,0,W,H);
+  const fs=Math.round(Math.min(W,H)*.065), pad=Math.round(fs*.9);
+  g.font=`${fs}px "VT323", "Courier New", monospace`; g.textBaseline="top";
+  g.shadowColor="rgba(0,0,0,.6)"; g.shadowOffsetX=fs*.06; g.shadowOffsetY=fs*.06; g.fillStyle="#f4f1e6";
+  const blink=now.getMilliseconds()<500;
+  g.fillText(recOn?(blink?"● REC":"  REC"):"PLAY ▶",pad,pad);
+  const p=n=>String(n).padStart(2,"0");
+  const M=["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"][now.getMonth()];
+  g.textBaseline="bottom";
+  g.fillText(`${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,pad,H-pad-fs*1.05);
+  g.fillText(`${M}. ${p(now.getDate())} ${now.getFullYear()}`,pad,H-pad);
+  return true;
+}
+let glRunning=false;
+function renderFrame(){
+  if(!glRunning) return;
+  const v=$("cam"), cv=$("out");
+  if(v.readyState>=2 && v.videoWidth){
+    if(cv.width!==v.videoWidth||cv.height!==v.videoHeight){ cv.width=v.videoWidth; cv.height=v.videoHeight; gl.viewport(0,0,cv.width,cv.height); }
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,glTex);
+    try{ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,v); }catch{}
+    const F=filter, stamp=!!F.stamp&&amount>0;
+    if(stamp && drawStamp(cv.width,cv.height)){
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,glOvTex);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,ovCanvas);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    gl.uniform1f(glU.ovOn,stamp?1:0);
+    gl.uniform1f(glU.vhs,F.vhs||0); gl.uniform1f(glU.tm,performance.now()/1000%1000);
+    gl.uniform1f(glU.m,facing==="user"?1:0);
+    gl.uniform1f(glU.z,zoomMode==="digital"?zoom:1);
+    gl.uniform1f(glU.b,F.b||0); gl.uniform1f(glU.c,F.c??1); gl.uniform1f(glU.s,F.s??1);
+    gl.uniform1f(glU.w,F.w||0); gl.uniform1f(glU.t,F.t||0); gl.uniform1f(glU.pp,F.p||0);
+    gl.uniform1f(glU.f,F.f||0); gl.uniform1f(glU.v,F.v||0); gl.uniform1f(glU.h,F.h||0);
+    gl.uniform1f(glU.a,F.id==="none"?0:amount/100);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  }
+  requestAnimationFrame(renderFrame);
+}
+function startGL(){
+  if(!gl && !initGL()){ $("filterBar").classList.add("hidden"); $("out").classList.add("hidden"); $("cam").classList.remove("behind"); return; }
+  $("out").classList.remove("hidden"); $("cam").classList.add("behind"); $("filterBar").classList.remove("hidden");
+  $("cam").style.transform=""; showZoom();
+  if(!glRunning){ glRunning=true; renderFrame(); }
+}
+function stopGL(){ glRunning=false; }
+function buildFilters(){
+  const box=$("filters"); box.textContent="";
+  FILTERS.forEach(F=>{
+    const btn=document.createElement("button"); btn.dataset.id=F.id; btn.title=F.name;
+    const sw=document.createElement("i");
+    // amostra de cor aproximada, só para a miniatura
+    const css=[`brightness(${1+(F.b||0)*2})`,`contrast(${F.c??1})`,`saturate(${F.s??1})`,`sepia(${(F.p||0)+(Math.max(0,F.w||0)*.4)})`,F.w<0?`hue-rotate(${F.w*30}deg)`:""].join(" ");
+    sw.style.background="linear-gradient(135deg,#e9a66b,#c56d6d 45%,#5b7fb8)"; sw.style.filter=css;
+    const lb=document.createElement("span"); lb.textContent=F.name;
+    btn.append(sw,lb);
+    btn.onclick=()=>{ filter=F; store.set("filter",F.id); markFilter(); };
+    box.append(btn);
+  });
+  markFilter();
+}
+function markFilter(){
+  [...$("filters").children].forEach(b=>b.classList.toggle("on",b.dataset.id===filter.id));
+  $("amountRow").style.visibility=filter.id==="none"?"hidden":"visible";
+}
+$("amount").value=amount; $("amountVal").textContent=amount+"%";
+$("amount").addEventListener("input",e=>{ amount=+e.target.value; $("amountVal").textContent=amount+"%"; store.set("amount",amount); });
+buildFilters();
+
+// canvas para gravar o zoom digital (reserva, se o WebGL não funcionar)
 let canvasLoop=null;
 function zoomedStream(){
   const v=$("cam"), W=v.videoWidth||720, H=v.videoHeight||1280;
@@ -306,7 +489,9 @@ async function startRec(){
   await countdown();
   const type=pickType();
   // zoom digital: grava sempre pelo canvas para o zoom poder mudar durante a gravação
-  const src=(zoomMode==="digital"&&HTMLCanvasElement.prototype.captureStream)?zoomedStream():stream;
+  let src=stream;
+  if(gl&&$("out").captureStream){ src=$("out").captureStream(30); stream.getAudioTracks().forEach(t=>src.addTrack(t)); }
+  else if(zoomMode==="digital"&&HTMLCanvasElement.prototype.captureStream) src=zoomedStream();
   try{ recorder=new MediaRecorder(src,type?{mimeType:type,videoBitsPerSecond:8_000_000}:undefined); }
   catch{ recorder=new MediaRecorder(src); }
   ext=(recorder.mimeType||type).includes("mp4")?"mp4":"webm";
@@ -359,7 +544,7 @@ $("go").onclick=async()=>{
   $("setup").classList.add("hidden"); $("stage").classList.remove("hidden");
   buildText(); playing=false;
 };
-function closeStage(){ stopRec(); stopCamera(); $("stage").classList.add("hidden"); $("setup").classList.remove("hidden"); try{wake?.release()}catch{} }
+function closeStage(){ stopRec(); stopCamera(); stopGL(); $("stage").classList.add("hidden"); $("setup").classList.remove("hidden"); try{wake?.release()}catch{} }
 $("back").onclick=closeStage;
 $("switchCam").onclick=async()=>{ facing=facing==="user"?"environment":"user"; try{await openCamera();}catch{} };
 window.addEventListener("resize",apply);
